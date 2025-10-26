@@ -6,8 +6,12 @@ import json
 import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from pathlib import Path
 
-load_dotenv()
+# Carrega o .env do diretório raiz do projeto
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(dotenv_path=env_path, override=True)  # override=True força sobrescrever variáveis do sistema
+
 app = FastAPI()
 
 # Supabase client
@@ -80,6 +84,15 @@ Responda exatamente em JSON, sem crases e sem texto extra:
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Debug: verifica se as variáveis foram carregadas
+print("\n" + "="*80)
+print("🔍 VERIFICAÇÃO DE VARIÁVEIS DE AMBIENTE")
+print("="*80)
+print(f"✅ OPENAI_API_KEY carregada: {OPENAI_API_KEY[:20]}..." if OPENAI_API_KEY else "❌ OPENAI_API_KEY NÃO encontrada")
+print(f"✅ SUPABASE_URL: {SUPABASE_URL}" if SUPABASE_URL else "❌ SUPABASE_URL NÃO encontrada")
+print(f"✅ SUPABASE_BUCKET: {SUPABASE_BUCKET}" if SUPABASE_BUCKET else "❌ SUPABASE_BUCKET NÃO encontrada")
+print("="*80 + "\n")
 
 @app.post("/classify_intent", response_model=IntentResponse)
 def classify_intent(message: Message):
