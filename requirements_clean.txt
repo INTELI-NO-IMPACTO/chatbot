@@ -1,8 +1,0 @@
-fastapi==0.120.0
-uvicorn==0.38.0
-python-dotenv==1.1.1
-pydantic==2.12.3
-httpx>=0.26,<0.28
-openai>=2.0.0
-python-telegram-bot>=21.0
-supabase>=2.0.0
