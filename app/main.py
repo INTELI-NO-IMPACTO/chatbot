@@ -1,12 +1,13 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
-from typing import Literal
+from typing import Literal, Optional, List
 from openai import OpenAI
 import json
 import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from pathlib import Path
+from datetime import datetime
 
 # Carrega o .env do diretório raiz do projeto
 env_path = Path(__file__).parent.parent / '.env'
@@ -25,10 +26,14 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    user_id: Optional[int] = None  # ID do usuário logado (opcional para compatibilidade)
+    session_id: Optional[str] = None  # ID da sessão para usuários não logados
 
 class ChatResponse(BaseModel):
     response: str
     contexto_utilizado: bool
+    chat_id: Optional[int] = None  # ID do chat criado/usado
+    historico_usado: bool = False  # Indica se usou histórico anterior
 
 IntentLiteral = Literal[
     "RETIFICACAO_NOME",
@@ -122,7 +127,7 @@ def classify_intent(message: Message):
 @app.get("/concatenate_artigos")
 def concatenate_artigos():
     """
-    Busca todos os documentos chamados 'ARTIGO' no bucket knowledge-base
+    Busca todos os documentos .md do bucket knowledge-base
     e concatena o conteúdo de todos eles.
     """
     try:
@@ -132,12 +137,12 @@ def concatenate_artigos():
         contexto = ""
         artigos_encontrados = []
         
-        # Filtra e processa apenas arquivos que contenham "ARTIGO" no nome
+        # Filtra e processa apenas arquivos .md
         for file in files:
             file_name = file.get('name', '')
             
-            # Verifica se o arquivo contém "ARTIGO" no nome (case insensitive)
-            if "artigo" in file_name.lower():
+            # Verifica se o arquivo termina com .md (case insensitive)
+            if file_name.lower().endswith('.md'):
                 artigos_encontrados.append(file_name)
                 
                 # Faz o download do conteúdo do arquivo
@@ -178,7 +183,7 @@ def concatenate_artigos():
 
 def get_contexto_artigos():
     """
-    Função auxiliar para buscar e concatenar todos os artigos.
+    Função auxiliar para buscar e concatenar todos os arquivos .md.
     Retorna o contexto como string.
     """
     try:
@@ -188,7 +193,7 @@ def get_contexto_artigos():
         for file in files:
             file_name = file.get('name', '')
             
-            if "artigo" in file_name.lower():
+            if file_name.lower().endswith('.md'):
                 try:
                     response = supabase.storage.from_(SUPABASE_BUCKET).download(file_name)
                     conteudo = response.decode('utf-8')
@@ -204,54 +209,274 @@ def get_contexto_artigos():
         print(f"Erro ao buscar contexto: {e}")
         return ""
 
+def get_or_create_chat(user_id: Optional[int], session_id: Optional[str]):
+    """
+    Busca ou cria um chat ativo para o usuário ou sessão.
+    Retorna o ID do chat.
+    """
+    try:
+        # Se não tiver nem user_id nem session_id, cria um temporário
+        if not user_id and not session_id:
+            session_id = f"temp_{datetime.now().timestamp()}"
+        
+        # Busca um chat ativo existente
+        if user_id:
+            # Verifica se o usuário existe na tabela users
+            user_check = supabase.table('users').select('id').eq('id', user_id).execute()
+            
+            # Se o usuário não existir, usa session_id ao invés
+            if not user_check.data:
+                print(f"⚠️ User ID {user_id} não encontrado, usando session_id")
+                session_id = f"user_{user_id}_temp"
+                user_id = None
+                result = supabase.table('chats').select('id').eq('session_id', session_id).eq('is_active', True).order('created_at', desc=True).limit(1).execute()
+            else:
+                result = supabase.table('chats').select('id').eq('user_id', user_id).eq('is_active', True).order('created_at', desc=True).limit(1).execute()
+        elif session_id:
+            result = supabase.table('chats').select('id').eq('session_id', session_id).eq('is_active', True).order('created_at', desc=True).limit(1).execute()
+        else:
+            result = None
+        
+        # Se encontrou um chat ativo, retorna o ID
+        if result and result.data:
+            return result.data[0]['id']
+        
+        # Caso contrário, cria um novo chat
+        new_chat = {
+            'user_id': user_id,  # Pode ser None
+            'session_id': session_id,
+            'title': 'Nova conversa',
+            'is_active': True,
+            'created_at': datetime.now().isoformat(),
+            'updated_at': datetime.now().isoformat()
+        }
+        
+        result = supabase.table('chats').insert(new_chat).execute()
+        return result.data[0]['id']
+        
+    except Exception as e:
+        print(f"Erro ao buscar/criar chat: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao gerenciar chat: {str(e)}")
+
+def get_chat_history(chat_id: int, limit: int = 30):
+    """
+    Busca as últimas mensagens de um chat.
+    Retorna lista de mensagens no formato [{"role": "user/assistant", "content": "..."}]
+    """
+    try:
+        result = supabase.table('chat_messages').select('role, content').eq('chat_id', chat_id).order('created_at', desc=False).limit(limit).execute()
+        
+        if not result.data:
+            return []
+        
+        # Converte para o formato esperado pela OpenAI
+        messages = []
+        for msg in result.data:
+            messages.append({
+                "role": msg['role'],
+                "content": msg['content']
+            })
+        
+        return messages
+        
+    except Exception as e:
+        print(f"Erro ao buscar histórico: {e}")
+        return []
+
+def save_message(chat_id: int, role: str, content: str):
+    """
+    Salva uma mensagem no banco de dados.
+    """
+    try:
+        message = {
+            'chat_id': chat_id,
+            'role': role,
+            'content': content,
+            'created_at': datetime.now().isoformat()
+        }
+        
+        supabase.table('chat_messages').insert(message).execute()
+        
+        # Atualiza o timestamp do chat
+        supabase.table('chats').update({'updated_at': datetime.now().isoformat()}).eq('id', chat_id).execute()
+        
+    except Exception as e:
+        print(f"Erro ao salvar mensagem: {e}")
+        # Não lança exceção para não quebrar o fluxo
+
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_context(request: ChatRequest):
     """
-    Endpoint para conversar com o ChatGPT usando o contexto dos artigos.
+    Endpoint para conversar com o ChatGPT usando o contexto dos artigos e histórico de conversas.
     
-    O contexto é automaticamente adicionado antes da mensagem do usuário.
+    O contexto dos artigos é automaticamente adicionado.
+    O histórico das últimas 30 mensagens é recuperado do banco de dados.
     """
     try:
-        # Busca o contexto dos artigos
+        # 1. Busca ou cria um chat para o usuário/sessão
+        chat_id = get_or_create_chat(request.user_id, request.session_id)
+        
+        # 2. Busca o histórico de mensagens (últimas 30)
+        historico = get_chat_history(chat_id, limit=30)
+        historico_usado = len(historico) > 0
+        
+        # 3. Busca o contexto dos artigos
         contexto = get_contexto_artigos()
         
         if not contexto:
             raise HTTPException(status_code=500, detail="Não foi possível carregar o contexto dos artigos")
         
-        # Monta o prompt com contexto + instrução + mensagem
-        prompt_sistema = f"""{contexto}
+        # 4. Monta o prompt do sistema com divisões claras
+        prompt_sistema = f"""
+════════════════════════════════════════════════════════════════════════════════
+📚 SEÇÃO 1: BASE DE CONHECIMENTO (Artigos de Referência)
+════════════════════════════════════════════════════════════════════════════════
 
-Com base no texto acima, responda de forma sucinta, acolhedora e respeitosa às perguntas do usuário.
+{contexto}
+
+════════════════════════════════════════════════════════════════════════════════
+🎯 INSTRUÇÕES PARA O ASSISTENTE
+════════════════════════════════════════════════════════════════════════════════
+
 Você é um assistente especializado em orientar pessoas trans sobre:
 - Retificação de nome e gênero
 - Terapia hormonal (hormonização)
 - Prevenção e tratamento de ISTs
 
-Seja empático, claro e objetivo nas suas respostas."""
+IMPORTANTE:
+- Use APENAS as informações da BASE DE CONHECIMENTO acima
+- Se houver HISTÓRICO DE CONVERSAS abaixo, mantenha coerência com elas
+- Responda de forma sucinta, acolhedora e respeitosa
+- Use emojis e linguagem inclusiva quando apropriado
+- Se não souber algo que não está na base de conhecimento, seja honesto
+
+════════════════════════════════════════════════════════════════════════════════
+"""
         
-        # Chama a API do OpenAI
+        # 5. Monta a lista de mensagens
+        messages = [{"role": "system", "content": prompt_sistema}]
+        
+        # 6. Adiciona o histórico com marcação clara
+        if historico:
+            historico_formatado = "\n════════════════════════════════════════════════════════════════════════════════\n"
+            historico_formatado += f"💬 SEÇÃO 2: HISTÓRICO DA CONVERSA ({len(historico)} mensagens anteriores)\n"
+            historico_formatado += "════════════════════════════════════════════════════════════════════════════════\n\n"
+            
+            for i, msg in enumerate(historico, 1):
+                role_label = "USUÁRIO" if msg['role'] == 'user' else "ASSISTENTE"
+                historico_formatado += f"[Mensagem {i} - {role_label}]:\n{msg['content']}\n\n"
+            
+            historico_formatado += "════════════════════════════════════════════════════════════════════════════════\n"
+            
+            # Adiciona como mensagem do sistema para contexto
+            messages.append({"role": "system", "content": historico_formatado})
+        
+        # 7. Adiciona separador e a pergunta atual
+        mensagem_atual = f"""
+════════════════════════════════════════════════════════════════════════════════
+❓ SEÇÃO 3: PERGUNTA ATUAL DO USUÁRIO
+════════════════════════════════════════════════════════════════════════════════
+
+{request.message}
+
+════════════════════════════════════════════════════════════════════════════════
+"""
+        
+        messages.append({"role": "user", "content": mensagem_atual})
+        
+        # 8. Chama a API do OpenAI
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": prompt_sistema},
-                {"role": "user", "content": request.message}
-            ],
+            messages=messages,
             temperature=0.7,
             max_tokens=1000
         )
         
         resposta = response.choices[0].message.content
         
+        # 7. Salva a mensagem do usuário e a resposta no banco
+        save_message(chat_id, "user", request.message)
+        save_message(chat_id, "assistant", resposta)
+        
         # Print para debug
         print("\n" + "="*80)
-        print(f"PERGUNTA DO USUÁRIO: {request.message}")
-        print(f"RESPOSTA: {resposta}")
+        print(f"💬 CHAT ID: {chat_id}")
+        print(f"📊 HISTÓRICO USADO: {len(historico)} mensagens")
+        print(f"❓ PERGUNTA DO USUÁRIO: {request.message}")
+        print(f"🤖 RESPOSTA: {resposta}")
         print("="*80 + "\n")
         
         return {
             "response": resposta,
-            "contexto_utilizado": True
+            "contexto_utilizado": True,
+            "chat_id": chat_id,
+            "historico_usado": historico_usado
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao processar chat: {str(e)}")
+
+@app.get("/chat/history/{chat_id}")
+def get_chat_history_endpoint(chat_id: int, limit: int = 50):
+    """
+    Busca o histórico de mensagens de um chat específico.
+    """
+    try:
+        messages = get_chat_history(chat_id, limit)
+        return {
+            "chat_id": chat_id,
+            "total_messages": len(messages),
+            "messages": messages
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar histórico: {str(e)}")
+
+@app.get("/chats/user/{user_id}")
+def get_user_chats(user_id: int):
+    """
+    Lista todos os chats de um usuário.
+    """
+    try:
+        result = supabase.table('chats').select('id, title, created_at, updated_at, is_active').eq('user_id', user_id).order('updated_at', desc=True).execute()
+        
+        return {
+            "user_id": user_id,
+            "total_chats": len(result.data),
+            "chats": result.data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar chats: {str(e)}")
+
+@app.delete("/chat/{chat_id}")
+def delete_chat(chat_id: int):
+    """
+    Desativa um chat (soft delete).
+    """
+    try:
+        supabase.table('chats').update({'is_active': False}).eq('id', chat_id).execute()
+        return {"success": True, "message": f"Chat {chat_id} desativado com sucesso"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao desativar chat: {str(e)}")
+
+@app.post("/chat/{chat_id}/new")
+def start_new_chat(user_id: Optional[int] = None, session_id: Optional[str] = None):
+    """
+    Inicia um novo chat para o usuário (desativa o atual e cria um novo).
+    """
+    try:
+        # Desativa chats antigos
+        if user_id:
+            supabase.table('chats').update({'is_active': False}).eq('user_id', user_id).eq('is_active', True).execute()
+        elif session_id:
+            supabase.table('chats').update({'is_active': False}).eq('session_id', session_id).eq('is_active', True).execute()
+        
+        # Cria novo chat
+        chat_id = get_or_create_chat(user_id, session_id)
+        
+        return {
+            "success": True,
+            "chat_id": chat_id,
+            "message": "Novo chat criado com sucesso"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao criar novo chat: {str(e)}")
