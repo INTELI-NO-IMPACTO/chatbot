@@ -42,8 +42,14 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Armazena os chat_ids em memória (pode ser substituído por banco de dados)
+# Configurações do sistema
+LINK_APLICACAO = "http://localhost:5173"  # Link da aplicação web
+MENSAGENS_ANTES_LINK = 5  # Número de mensagens antes de enviar o link
+
+# Armazena os chat_ids e contadores em memória (pode ser substituído por banco de dados)
 user_sessions = {}
+message_counters = {}  # Contador de mensagens por usuário
+link_sent = {}  # Controla se o link já foi enviado para o usuário
 
 def get_contexto_artigos():
     """
@@ -205,9 +211,13 @@ async def new_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Desativa o chat atual
         supabase.table('chats').update({'is_active': False}).eq('session_id', session_id).eq('is_active', True).execute()
 
-        # Remove da sessão em memória
+        # Remove da sessão em memória e reseta contadores
         if telegram_user_id in user_sessions:
             del user_sessions[telegram_user_id]
+        if telegram_user_id in message_counters:
+            del message_counters[telegram_user_id]
+        if telegram_user_id in link_sent:
+            del link_sent[telegram_user_id]
 
         await update.message.reply_text("✨ Nova conversa iniciada! Como posso te ajudar?")
         logger.info(f"Usuário {telegram_user_id} iniciou nova conversa")
@@ -315,6 +325,34 @@ IMPORTANTE:
 
         # 10. Envia a resposta
         await update.message.reply_text(resposta)
+
+        # 11. Incrementa o contador de mensagens do usuário
+        if telegram_user_id not in message_counters:
+            message_counters[telegram_user_id] = 0
+        message_counters[telegram_user_id] += 1
+
+        # 12. Verifica se deve enviar o link da aplicação
+        should_send_link = (
+            message_counters[telegram_user_id] >= MENSAGENS_ANTES_LINK and
+            telegram_user_id not in link_sent
+        )
+
+        if should_send_link:
+            link_message = f"""
+💡 Vejo que você está interessado em saber mais!
+
+Se preferir, temos uma aplicação web completa onde você pode:
+✨ Navegar por todo o conteúdo de forma organizada
+📱 Ter uma experiência mais visual e interativa
+💬 Continuar suas conversas em qualquer dispositivo
+
+🔗 Acesse aqui: {LINK_APLICACAO}
+
+Mas fique à vontade para continuar conversando aqui no Telegram também! 💜
+"""
+            await update.message.reply_text(link_message)
+            link_sent[telegram_user_id] = True
+            logger.info(f"Link da aplicação enviado para usuário {telegram_user_id} após {message_counters[telegram_user_id]} mensagens")
 
         logger.info(f"Resposta enviada para {telegram_user_id}")
 
