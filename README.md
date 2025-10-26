@@ -41,18 +41,8 @@ Este projeto nasceu da necessidade de criar um **assistente virtual acolhedor e 
 ├── 📂 app/                          # Aplicação principal
 │   ├── 📄 main.py                   # API REST FastAPI com endpoints de chat
 │   ├── 📄 telegram_bot.py           # Bot do Telegram com integração completa
-│   └── 📂 services/                 # Serviços auxiliares (se houver)
-│
-├── 📂 migrations/                   # Migrações de banco de dados
-│
-├── 📂 assets/                       # Recursos visuais (logos, imagens)
-│
-├── 📂 docs/                         # Documentação do projeto
-│   ├── 📄 PR_DESCRIPTION.md         # Descrição das features implementadas
-│   └── 📄 TELEGRAM_PR_DESCRIPTION.md # Documentação do bot do Telegram
 │
 ├── 📄 requirements.txt              # Dependências Python
-├── 📄 .env.example                  # Exemplo de variáveis de ambiente
 ├── 📄 .gitignore                    # Arquivos ignorados pelo Git
 └── 📄 README.md                     # Este arquivo
 ```
