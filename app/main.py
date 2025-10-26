@@ -304,6 +304,49 @@ def save_message(chat_id: int, role: str, content: str):
         print(f"Erro ao salvar mensagem: {e}")
         # Não lança exceção para não quebrar o fluxo
 
+def get_user_info(user_id: int) -> Optional[dict]:
+    """
+    Busca as informações do usuário (nome, nome social e pronome) da tabela users.
+    Retorna um dict com 'name', 'social_name' e 'pronoun', ou None se não encontrado.
+    """
+    try:
+        result = supabase.table('users').select('name, social_name, pronoun').eq('id', user_id).single().execute()
+        if result.data:
+            return {
+                'name': result.data.get('name'),
+                'social_name': result.data.get('social_name'),
+                'pronoun': result.data.get('pronoun')
+            }
+        return None
+    except Exception as e:
+        print(f"Erro ao buscar informações do usuário: {e}")
+        return None
+
+def get_preferred_name_and_pronoun(user_id: Optional[int]) -> Optional[dict]:
+    """
+    Retorna o nome preferido e pronome do usuário.
+    Prioriza nome social sobre nome.
+    Retorna: {'name': str, 'pronoun': str} ou None
+    """
+    if not user_id:
+        return None
+    
+    user_info = get_user_info(user_id)
+    if not user_info:
+        return None
+    
+    # Prioriza o nome social, se disponível
+    preferred_name = user_info.get('social_name') or user_info.get('name')
+    pronoun = user_info.get('pronoun')
+    
+    if not preferred_name:
+        return None
+    
+    return {
+        'name': preferred_name,
+        'pronoun': pronoun if pronoun else None
+    }
+
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_context(request: ChatRequest):
     """
@@ -311,6 +354,7 @@ def chat_with_context(request: ChatRequest):
     
     O contexto dos artigos é automaticamente adicionado.
     O histórico das últimas 30 mensagens é recuperado do banco de dados.
+    Se o usuário estiver autenticado (user_id), busca o nome social ou nome da tabela users.
     """
     try:
         # 1. Busca ou cria um chat para o usuário/sessão
@@ -320,14 +364,39 @@ def chat_with_context(request: ChatRequest):
         historico = get_chat_history(chat_id, limit=30)
         historico_usado = len(historico) > 0
         
-        # 3. Busca o contexto dos artigos
+        # 3. Busca o nome e pronome do usuário (se estiver autenticado)
+        user_info = get_preferred_name_and_pronoun(request.user_id)
+        user_name = user_info.get('name') if user_info else None
+        user_pronoun = user_info.get('pronoun') if user_info else None
+        
+        # 4. Busca o contexto dos artigos
         contexto = get_contexto_artigos()
         
         if not contexto:
             raise HTTPException(status_code=500, detail="Não foi possível carregar o contexto dos artigos")
         
-        # 4. Monta o prompt do sistema com divisões claras
-        prompt_sistema = f"""
+        # 5. Monta o prompt do sistema com divisões claras
+        # Adiciona seção do nome e pronome se disponível
+        nome_section = ""
+        if user_name:
+            pronoun_text = f"\n🗣️ PRONOME PREFERIDO: {user_pronoun}" if user_pronoun else ""
+            nome_section = f"""
+════════════════════════════════════════════════════════════════════════════════
+👤 INFORMAÇÕES DO(A) INTERLOCUTOR(A)
+════════════════════════════════════════════════════════════════════════════════
+
+📛 NOME: {user_name}{pronoun_text}
+
+INSTRUÇÕES DE USO:
+- Use o nome de forma respeitosa e acolhedora durante a conversa
+- Personalize suas respostas chamando a pessoa pelo nome quando apropriado
+- {"Use o pronome '" + user_pronoun + "' nas conjugações e referências" if user_pronoun else "Use linguagem neutra quando não souber o pronome"}
+- Exemplos de linguagem inclusiva: "bem-vinde", "queride" (quando aplicável)
+
+════════════════════════════════════════════════════════════════════════════════
+"""
+        
+        prompt_sistema = f"""{nome_section}
 ════════════════════════════════════════════════════════════════════════════════
 📚 SEÇÃO 1: BASE DE CONHECIMENTO (Artigos de Referência)
 ════════════════════════════════════════════════════════════════════════════════
@@ -347,16 +416,18 @@ IMPORTANTE:
 - Use APENAS as informações da BASE DE CONHECIMENTO acima
 - Se houver HISTÓRICO DE CONVERSAS abaixo, mantenha coerência com elas
 - Responda de forma sucinta, acolhedora e respeitosa
-- Use emojis e linguagem inclusiva quando apropriado
+- Use emojis quando apropriado, mas de forma moderada
+- Não use termos muito técnicos e evite reforçar esteriótipos
 - Se não souber algo que não está na base de conhecimento, seja honesto
+- Use linguagem neutra e inclusiva sempre
 
 ════════════════════════════════════════════════════════════════════════════════
 """
         
-        # 5. Monta a lista de mensagens
+        # 6. Monta a lista de mensagens
         messages = [{"role": "system", "content": prompt_sistema}]
         
-        # 6. Adiciona o histórico com marcação clara
+        # 7. Adiciona o histórico com marcação clara
         if historico:
             historico_formatado = "\n════════════════════════════════════════════════════════════════════════════════\n"
             historico_formatado += f"💬 SEÇÃO 2: HISTÓRICO DA CONVERSA ({len(historico)} mensagens anteriores)\n"
@@ -401,7 +472,12 @@ IMPORTANTE:
         # Print para debug
         print("\n" + "="*80)
         print(f"💬 CHAT ID: {chat_id}")
-        print(f"📊 HISTÓRICO USADO: {len(historico)} mensagens")
+        if user_name:
+            pronoun_display = f" ({user_pronoun})" if user_pronoun else ""
+            print(f"👤 NOME DO USUÁRIO: {user_name}{pronoun_display}")
+        else:
+            print(f"👤 NOME DO USUÁRIO: Anônimo")
+        print(f"� HISTÓRICO USADO: {len(historico)} mensagens")
         print(f"❓ PERGUNTA DO USUÁRIO: {request.message}")
         print(f"🤖 RESPOSTA: {resposta}")
         print("="*80 + "\n")
