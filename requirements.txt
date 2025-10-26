@@ -6,3 +6,4 @@ httpx>=0.26,<0.28
 openai>=2.0.0
 python-telegram-bot>=21.0
 supabase>=2.0.0
+python-multipart>=0.0.9
